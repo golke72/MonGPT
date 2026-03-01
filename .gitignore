@@ -1,0 +1,49 @@
+# Файлы с секретами
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Виртуальное окружение
+venv/
+env/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Логи
+*.log
+logs/
+*.log.*
+
+# Временные файлы
+temp/
+downloads/
+uploads/
+*.tmp
+*.temp
+
+# Базы данных
+*.db
+*.sqlite
+*.sqlite3
+
+# Системные файлы
+.DS_Store
+Thumbs.db
+desktop.ini
