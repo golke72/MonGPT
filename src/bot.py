@@ -37,7 +37,7 @@ from cachetools import TTLCache
 from openai import AsyncOpenAI
 
 # Импорт keep_alive
-from src.keep_alive import keep_alive
+from keep_alive import keep_alive
 
 # Попытка импорта опциональных библиотек
 try:
