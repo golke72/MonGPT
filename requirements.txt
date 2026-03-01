@@ -1,42 +1,8 @@
-# Основные библиотеки
 aiogram==3.10.0
 python-dotenv==1.0.0
 aiohttp==3.9.0
-cachetools==5.3.1
-
-# OpenRouter / OpenAI
-openai==1.75.0  # Обновлённая версия без ошибки proxies
-
-# Поиск
+openai==1.75.0
 duckduckgo-search==6.2.0
-requests==2.31.0
-beautifulsoup4==4.12.2
-lxml==4.9.3
-
-# Медиа и видео
-yt-dlp
-pillow
-opencv-python-headless==4.8.1.78
-ffmpeg-python==0.2.0
-pydub==0.25.1
-
-# Графики
-matplotlib==3.7.2
-numpy==1.24.3
-
-# QR-коды
-pyzbar==0.1.9
-qrcode[pil]==7.4.2
-
-# Текст в речь
-gtts==2.3.2
-
-# Метаданные аудио
-mutagen==1.47.0
-
-# Веб-сервер для Render
-flask==2.3.3
-gunicorn==21.2.0
-
-# Фиксируем старую версию httpx для совместимости (уберет ошибку proxies)
-httpx==0.27.2
+PyPDF2==3.0.1
+python-docx==0.8.11
+uvloop==0.19.0
