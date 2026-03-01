@@ -34,6 +34,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from gtts import gTTS
 from cachetools import TTLCache
+from openai import AsyncOpenAI
+
+# Импорт keep_alive
+from src.keep_alive import keep_alive
 
 # Попытка импорта опциональных библиотек
 try:
@@ -58,12 +62,13 @@ except ImportError:
     print("⚠️ pydub не установлен, конвертация аудио ограничена")
 
 load_dotenv()
+keep_alive()  # ← Запускаем веб-сервер для Render
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ========== КОНФИГИ ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 YOUR_USER_ID = int(os.getenv("YOUR_USER_ID", "0"))
 AUDD_API_TOKEN = os.getenv("AUDD_API_TOKEN")
@@ -79,7 +84,6 @@ dp = Dispatcher()
 openrouter_client = None
 if OPENROUTER_API_KEY:
     try:
-        from openai import AsyncOpenAI
         openrouter_client = AsyncOpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=OPENROUTER_API_KEY,
@@ -92,20 +96,9 @@ if OPENROUTER_API_KEY:
     except Exception as e:
         logger.error(f"❌ OpenRouter ошибка: {e}")
 
-# Groq клиент
-groq_client = None
-if GROQ_API_KEY:
-    try:
-        from groq import AsyncGroq
-        groq_client = AsyncGroq(api_key=GROQ_API_KEY)
-        logger.info("✅ Groq клиент инициализирован")
-    except Exception as e:
-        logger.error(f"❌ Groq ошибка: {e}")
-
 # ========== ХРАНИЛИЩА ==========
 dialog_history: Dict[int, deque] = {}
 user_balances: Dict[int, float] = {}
-user_preferences: Dict[int, dict] = {}
 search_cache = TTLCache(maxsize=100, ttl=300)
 music_cache = TTLCache(maxsize=50, ttl=3600)
 MAX_HISTORY = 15
@@ -156,23 +149,18 @@ def deduct_balance(user_id: int, cost: float):
 
 # ========== КЛАВИАТУРЫ ==========
 def get_main_keyboard() -> ReplyKeyboardMarkup:
-    """Главная клавиатура с кнопками"""
     builder = ReplyKeyboardBuilder()
-    
     buttons = [
         ["🤖 MonGPT", "❓ Помощь"],
         ["💰 Баланс", "⚡ Функции"],
         ["🖼️ Фото", "🎵 Музыка"],
         ["🔍 Поиск", "⚙️ Ещё"]
     ]
-    
     for row in buttons:
         builder.row(*[KeyboardButton(text=btn) for btn in row])
-    
     return builder.as_markup(resize_keyboard=True)
 
 def get_inline_keyboard() -> InlineKeyboardBuilder:
-    """Инлайн клавиатура для дополнительных функций"""
     builder = InlineKeyboardBuilder()
     builder.button(text="🎨 Нарисовать", callback_data="draw")
     builder.button(text="🎤 Голос", callback_data="voice")
@@ -186,7 +174,6 @@ def get_inline_keyboard() -> InlineKeyboardBuilder:
     return builder
 
 def get_more_keyboard() -> InlineKeyboardBuilder:
-    """Клавиатура для раздела Ещё"""
     builder = InlineKeyboardBuilder()
     builder.button(text="📊 Курс валют", callback_data="currency")
     builder.button(text="🌡️ Погода", callback_data="weather")
@@ -199,29 +186,9 @@ def get_more_keyboard() -> InlineKeyboardBuilder:
     builder.adjust(2)
     return builder
 
-# ========== ОСНОВНЫЕ ФУНКЦИИ ==========
-async def chat_with_groq(user_id: int, text: str) -> Optional[str]:
-    """Общение через Groq"""
-    if not groq_client:
-        return None
-    
-    try:
-        history = list(get_user_history(user_id))
-        messages = [SYSTEM_PROMPT] + history + [{"role": "user", "content": text}]
-        
-        response = await groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=messages,
-            max_tokens=1024,
-            temperature=0.9,
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.error(f"Groq error: {e}")
-        return None
-
-async def chat_with_openrouter(user_id: int, text: str, model: str = "deepseek/deepseek-r1:free") -> Optional[str]:
-    """Общение через OpenRouter"""
+# ========== ФУНКЦИИ ==========
+async def chat_with_openrouter(user_id: int, text: str, model: str = "openrouter/free") -> Optional[str]:
+    """Общение через OpenRouter с автоматическим выбором модели"""
     if not openrouter_client:
         return None
     
@@ -241,106 +208,45 @@ async def chat_with_openrouter(user_id: int, text: str, model: str = "deepseek/d
         return None
 
 async def smart_chat(user_id: int, text: str) -> str:
-    """Умный выбор модели для ответа"""
-    # Сначала пробуем OpenRouter (DeepSeek)
-    answer = await chat_with_openrouter(user_id, text)
+    """Умный чат с определением типа задачи"""
     
-    # Если не сработало, пробуем Groq
-    if not answer:
-        answer = await chat_with_groq(user_id, text)
+    # Определяем тип задачи по тексту
+    task_type = "general"
+    if "код" in text.lower() or "программа" in text.lower() or "python" in text.lower():
+        task_type = "code"
+    elif "картинк" in text.lower() or "изображен" in text.lower() or "нарисуй" in text.lower():
+        task_type = "vision"
+    elif "быстр" in text.lower():
+        task_type = "fast"
     
-    # Если всё плохо, возвращаем заглушку
+    # Выбираем модель под задачу
+    if task_type == "code":
+        model = "deepseek/deepseek-r1:free"
+    elif task_type == "vision":
+        model = "google/gemini-3-flash-preview:free"
+    elif task_type == "fast":
+        model = "stepfun/step-3.5-flash:free"
+    else:
+        model = "openrouter/free"  # Умный роутер для всего остального
+    
+    answer = await chat_with_openrouter(user_id, text, model)
+    
     if not answer:
-        answer = "❌ Извини, бро, все API временно недоступны. Попробуй позже."
+        # Если не сработало, пробуем универсальный роутер
+        answer = await chat_with_openrouter(user_id, text, "openrouter/free")
+    
+    if not answer:
+        answer = "❌ Извини, бро, API временно недоступны. Попробуй позже."
     
     return answer
 
-# ========== РАБОТА С ФАЙЛАМИ ==========
 async def download_file(file_id: str) -> str:
-    """Скачивает файл из Telegram"""
     file = await bot.get_file(file_id)
     dest = tempfile.NamedTemporaryFile(delete=False).name
     await bot.download_file(file.file_path, dest)
     return dest
 
-async def convert_audio_format(input_path: str, output_format: str = "mp3") -> Optional[BytesIO]:
-    """Конвертирует аудио в нужный формат"""
-    if not PYDUB_AVAILABLE:
-        # Если pydub нет, просто читаем файл
-        with open(input_path, "rb") as f:
-            data = f.read()
-        return BytesIO(data)
-    
-    try:
-        audio = AudioSegment.from_file(input_path)
-        output = BytesIO()
-        audio.export(output, format=output_format)
-        output.seek(0)
-        return output
-    except Exception as e:
-        logger.error(f"Audio conversion error: {e}")
-        return None
-
-# ========== РАСПОЗНАВАНИЕ АУДИО ==========
-async def transcribe_audio(file_path: str) -> str:
-    """Распознавание речи через Groq Whisper"""
-    if not groq_client:
-        return "Groq не настроен"
-    
-    try:
-        # Конвертируем в нужный формат
-        audio_data = await convert_audio_format(file_path, "mp3")
-        if not audio_data:
-            return "Не удалось конвертировать аудио"
-        
-        # Отправляем в Whisper
-        transcription = await groq_client.audio.transcriptions.create(
-            file=("audio.mp3", audio_data.getvalue()),
-            model="whisper-large-v3",
-            response_format="text"
-        )
-        return transcription
-    except Exception as e:
-        logger.error(f"Transcribe error: {e}")
-        return f"Ошибка распознавания: {str(e)}"
-
-async def recognize_music_audd(file_path: str) -> Optional[dict]:
-    """Распознавание музыки через AudD API"""
-    if not AUDD_API_TOKEN:
-        return None
-    
-    try:
-        # Читаем аудиофайл
-        with open(file_path, "rb") as f:
-            audio_data = f.read()
-        
-        # Отправляем запрос
-        async with aiohttp.ClientSession() as session:
-            data = aiohttp.FormData()
-            data.add_field('api_token', AUDD_API_TOKEN)
-            data.add_field('file', audio_data, filename='audio.mp3', content_type='audio/mpeg')
-            data.add_field('return', 'apple_music,spotify')
-            
-            async with session.post('https://api.audd.io/', data=data) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    if result.get('status') == 'success':
-                        track = result.get('result', {})
-                        if track:
-                            return {
-                                'title': track.get('title', 'Unknown'),
-                                'artist': track.get('artist', 'Unknown'),
-                                'album': track.get('album', 'Unknown'),
-                                'label': track.get('label', ''),
-                                'release_date': track.get('release_date', '')
-                            }
-    except Exception as e:
-        logger.error(f"AudD error: {e}")
-    return None
-
-# ========== ПОИСК ==========
 async def search_web(query: str) -> Optional[str]:
-    """Поиск в интернете через DuckDuckGo"""
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=5))
@@ -356,35 +262,7 @@ async def search_web(query: str) -> Optional[str]:
         logger.error(f"Search error: {e}")
     return None
 
-async def search_download_link(query: str, site: str = None) -> Optional[List[dict]]:
-    """Поиск ссылок на скачивание"""
-    try:
-        search_query = query
-        if site:
-            search_query += f" site:{site}"
-        
-        with DDGS() as ddgs:
-            results = list(ddgs.text(search_query, max_results=10))
-            
-        links = []
-        for r in results:
-            link = r.get('href', '')
-            title = r.get('title', '')
-            # Фильтруем только ссылки на скачивание
-            if any(ext in link for ext in ['.zip', '.rar', '.7z', '.mp3', '.mp4', '.jar', '.mcpack']):
-                links.append({
-                    'title': title,
-                    'url': link
-                })
-        
-        return links if links else None
-    except Exception as e:
-        logger.error(f"Download search error: {e}")
-        return None
-
-# ========== РАБОТА С КАРТИНКАМИ ==========
 async def analyze_image(file_path: str, prompt: str = "Что на этом изображении?") -> Optional[str]:
-    """Анализ изображения через Vision API"""
     if not openrouter_client:
         return "OpenRouter не настроен"
     
@@ -393,7 +271,7 @@ async def analyze_image(file_path: str, prompt: str = "Что на этом из
             base64_image = base64.b64encode(f.read()).decode('utf-8')
         
         completion = await openrouter_client.chat.completions.create(
-            model="google/gemini-2.0-flash-exp:free",
+            model="google/gemini-3-flash-preview:free",
             messages=[
                 {
                     "role": "user",
@@ -410,31 +288,10 @@ async def analyze_image(file_path: str, prompt: str = "Что на этом из
         logger.error(f"Vision error: {e}")
         return None
 
-async def enhance_image(file_path: str) -> BytesIO:
-    """Улучшение качества изображения"""
-    try:
-        # Читаем изображение
-        img = cv2.imread(file_path)
-        
-        # Увеличиваем контраст и яркость
-        enhanced = cv2.convertScaleAbs(img, alpha=1.2, beta=10)
-        
-        # Сохраняем в BytesIO
-        _, buffer = cv2.imencode('.jpg', enhanced)
-        return BytesIO(buffer)
-    except Exception as e:
-        logger.error(f"Enhance error: {e}")
-        return None
-
 async def image_to_sticker(file_path: str) -> BytesIO:
-    """Преобразование изображения в стикер"""
     try:
         img = Image.open(file_path)
-        
-        # Изменяем размер для стикера
         img.thumbnail((512, 512))
-        
-        # Конвертируем в PNG
         output = BytesIO()
         img.save(output, format='PNG')
         output.seek(0)
@@ -443,34 +300,19 @@ async def image_to_sticker(file_path: str) -> BytesIO:
         logger.error(f"Sticker error: {e}")
         return None
 
-# ========== ГЕНЕРАЦИЯ ==========
-async def generate_image(prompt: str) -> Optional[str]:
-    """Генерация изображения по тексту"""
-    if not openrouter_client:
-        return None
-    
+async def enhance_image(file_path: str) -> BytesIO:
     try:
-        completion = await openrouter_client.chat.completions.create(
-            model="stabilityai/stable-diffusion",
-            messages=[{"role": "user", "content": f"Generate: {prompt}"}]
-        )
-        if completion.choices:
-            return completion.choices[0].message.content
+        img = cv2.imread(file_path)
+        enhanced = cv2.convertScaleAbs(img, alpha=1.2, beta=10)
+        _, buffer = cv2.imencode('.jpg', enhanced)
+        return BytesIO(buffer)
     except Exception as e:
-        logger.error(f"Image generation error: {e}")
-    return None
+        logger.error(f"Enhance error: {e}")
+        return None
 
-def generate_password(length: int = 12) -> str:
-    """Генерация пароля"""
-    chars = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%&"
-    return ''.join(random.choice(chars) for _ in range(length))
-
-# ========== QR-КОДЫ ==========
 async def generate_qr(data: str) -> Optional[BytesIO]:
-    """Генерация QR-кода"""
     if not QRCODE_AVAILABLE:
         return None
-    
     try:
         img = qrcode.make(data)
         output = BytesIO()
@@ -478,14 +320,12 @@ async def generate_qr(data: str) -> Optional[BytesIO]:
         output.seek(0)
         return output
     except Exception as e:
-        logger.error(f"QR generation error: {e}")
+        logger.error(f"QR error: {e}")
         return None
 
 async def scan_qr(file_path: str) -> Optional[str]:
-    """Сканирование QR-кода"""
     if not PYZBAR_AVAILABLE:
         return None
-    
     try:
         image = cv2.imread(file_path)
         qr_codes = decode(image)
@@ -495,15 +335,16 @@ async def scan_qr(file_path: str) -> Optional[str]:
         logger.error(f"QR scan error: {e}")
     return None
 
-# ========== ГРАФИКИ ==========
-async def create_currency_chart(currency: str = "USD", days: int = 7) -> Optional[BytesIO]:
-    """Создание графика курса валют"""
+def generate_password(length: int = 12) -> str:
+    chars = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%&"
+    return ''.join(random.choice(chars) for _ in range(length))
+
+async def create_currency_chart(currency: str = "USD") -> Optional[BytesIO]:
     try:
-        # Генерируем случайные данные для примера
         dates = [datetime.now().strftime("%d.%m")]
         values = [random.uniform(80, 100)]
         
-        for i in range(1, days):
+        for i in range(1, 7):
             dates.append((datetime.now().replace(day=datetime.now().day - i)).strftime("%d.%m"))
             values.append(values[-1] + random.uniform(-5, 5))
         
@@ -513,8 +354,6 @@ async def create_currency_chart(currency: str = "USD", days: int = 7) -> Optiona
         plt.figure(figsize=(10, 5))
         plt.plot(dates, values, marker='o', linestyle='-', color='#FF6B6B')
         plt.title(f'Курс {currency} к RUB', fontsize=16, fontweight='bold')
-        plt.xlabel('Дата')
-        plt.ylabel('Курс')
         plt.grid(True, alpha=0.3)
         plt.xticks(rotation=45)
         
@@ -527,9 +366,7 @@ async def create_currency_chart(currency: str = "USD", days: int = 7) -> Optiona
         logger.error(f"Chart error: {e}")
         return None
 
-# ========== МУЗЫКА И ВИДЕО ==========
 async def download_youtube_audio(query: str) -> Optional[dict]:
-    """Скачивание аудио с YouTube"""
     ydl_opts = {
         'format': 'bestaudio/best',
         'postprocessors': [{
@@ -558,17 +395,15 @@ async def download_youtube_audio(query: str) -> Optional[dict]:
                             'duration': entry.get('duration', 0)
                         }
     except Exception as e:
-        logger.error(f"Audio download error: {e}")
+        logger.error(f"Audio error: {e}")
     return None
 
 async def download_youtube_video(url: str) -> Optional[str]:
-    """Скачивание видео с YouTube"""
     ydl_opts = {
         'format': 'best[ext=mp4]',
         'outtmpl': 'temp/%(title)s.%(ext)s',
         'quiet': True,
     }
-    
     try:
         os.makedirs('temp', exist_ok=True)
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -577,27 +412,11 @@ async def download_youtube_video(url: str) -> Optional[str]:
             if os.path.exists(filename):
                 return filename
     except Exception as e:
-        logger.error(f"Video download error: {e}")
+        logger.error(f"Video error: {e}")
     return None
 
-# ========== ТЕКСТ В РЕЧЬ ==========
-async def text_to_speech(text: str) -> BytesIO:
-    """Преобразование текста в речь"""
-    try:
-        tts = gTTS(text=text, lang='ru', slow=False)
-        audio_bytes = BytesIO()
-        tts.write_to_fp(audio_bytes)
-        audio_bytes.seek(0)
-        return audio_bytes
-    except Exception as e:
-        logger.error(f"TTS error: {e}")
-        return None
-
-# ========== ПОЛЕЗНЫЕ УТИЛИТЫ ==========
 async def get_weather(city: str) -> Optional[str]:
-    """Получение погоды"""
     try:
-        # Используем wttr.in для простоты
         url = f"https://wttr.in/{city}?format=%t+%c+%w+%h&m"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=10) as resp:
@@ -609,36 +428,45 @@ async def get_weather(city: str) -> Optional[str]:
     return None
 
 def calculate(expression: str) -> Optional[str]:
-    """Простой калькулятор"""
     try:
-        # Заменяем запятые на точки
         expression = expression.replace(',', '.')
-        # Убираем всё кроме цифр и операторов
         safe_expression = re.sub(r'[^0-9+\-*/().]', '', expression)
         result = eval(safe_expression)
         return f"{result:.2f}"
     except Exception as e:
         return None
 
-async def convert_currency(amount: float, from_curr: str, to_curr: str) -> Optional[float]:
-    """Конвертация валют"""
+async def recognize_music_audd(file_path: str) -> Optional[dict]:
+    if not AUDD_API_TOKEN:
+        return None
     try:
-        url = f"https://api.exchangerate-api.com/v4/latest/{from_curr.upper()}"
+        with open(file_path, "rb") as f:
+            audio_data = f.read()
+        
         async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
+            data = aiohttp.FormData()
+            data.add_field('api_token', AUDD_API_TOKEN)
+            data.add_field('file', audio_data, filename='audio.mp3', content_type='audio/mpeg')
+            data.add_field('return', 'apple_music,spotify')
+            
+            async with session.post('https://api.audd.io/', data=data) as resp:
                 if resp.status == 200:
-                    data = await resp.json()
-                    rate = data.get('rates', {}).get(to_curr.upper())
-                    if rate:
-                        return amount * rate
+                    result = await resp.json()
+                    if result.get('status') == 'success':
+                        track = result.get('result', {})
+                        if track:
+                            return {
+                                'title': track.get('title', 'Unknown'),
+                                'artist': track.get('artist', 'Unknown'),
+                                'album': track.get('album', 'Unknown')
+                            }
     except Exception as e:
-        logger.error(f"Currency conversion error: {e}")
+        logger.error(f"AudD error: {e}")
     return None
 
-# ========== ОБРАБОТЧИКИ КОМАНД ==========
+# ========== ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    """Старт бота"""
     user_id = message.from_user.id
     if user_id == YOUR_USER_ID:
         welcome = f"👑 С возвращением, создатель! Баланс: {your_balance:,}"
@@ -655,7 +483,6 @@ async def cmd_start(message: Message):
 
 @dp.message(F.text == "🤖 MonGPT")
 async def cmd_mongpt(message: Message):
-    """Кнопка MonGPT"""
     text = (
         "<b>🤖 MonGPT</b>\n\n"
         "<b>Версия:</b> 5.0\n"
@@ -674,20 +501,12 @@ async def cmd_mongpt(message: Message):
         "• 🎭 Стикеры из фото\n\n"
         "Просто напиши что хочешь!"
     )
-    
-    await message.reply(
-        text, 
-        parse_mode="HTML",
-        reply_markup=get_inline_keyboard().as_markup()
-    )
+    await message.reply(text, parse_mode="HTML", reply_markup=get_inline_keyboard().as_markup())
 
 @dp.message(F.text == "❓ Помощь")
 async def cmd_help(message: Message):
-    """Кнопка помощи"""
     text = (
         "<b>❓ MonGPT — Помощь</b>\n\n"
-        "<b>🤖 КАК ОБЩАТЬСЯ:</b>\n"
-        "Просто пиши что хочешь — я сам пойму:\n\n"
         "🎨 <b>Рисунки:</b> \"нарисуй кота\"\n"
         "🎤 <b>Голос:</b> \"озвучь привет\"\n"
         "🔐 <b>Пароль:</b> \"пароль 12\"\n"
@@ -696,17 +515,12 @@ async def cmd_help(message: Message):
         "🔲 <b>QR:</b> отправь фото QR-кода или напиши \"qr текст\"\n"
         "📹 <b>Видео:</b> \"скачай видео ссылка\"\n"
         "🌐 <b>Ссылка:</b> \"найди ссылку на Dark Red Bedwars\"\n\n"
-        "<b>⚡ КОМАНДЫ:</b>\n"
-        "/start — перезапуск\n"
-        "/balance — твой баланс\n"
-        "/clear — сброс истории\n\n"
         "👇 Меню всегда внизу"
     )
     await message.reply(text, parse_mode="HTML")
 
 @dp.message(F.text == "💰 Баланс")
 async def cmd_balance(message: Message):
-    """Кнопка баланса"""
     user_id = message.from_user.id
     if user_id == YOUR_USER_ID:
         text = f"<b>💰 Твой баланс:</b> {your_balance:,.0f}"
@@ -716,7 +530,6 @@ async def cmd_balance(message: Message):
 
 @dp.message(F.text == "⚡ Функции")
 async def cmd_functions(message: Message):
-    """Кнопка функций"""
     await message.reply(
         "⚡ <b>40+ функций MonGPT</b>\n\n"
         "Нажимай на кнопки ниже 👇",
@@ -726,7 +539,6 @@ async def cmd_functions(message: Message):
 
 @dp.message(F.text == "🖼️ Фото")
 async def cmd_photo(message: Message):
-    """Кнопка фото"""
     await message.reply(
         "🖼️ <b>Отправь мне фото</b>\n"
         "И я сделаю:\n"
@@ -738,186 +550,64 @@ async def cmd_photo(message: Message):
 
 @dp.message(F.text == "🎵 Музыка")
 async def cmd_music(message: Message):
-    """Кнопка музыки"""
     text = (
         "🎵 <b>MonGPT — Музыка</b>\n\n"
-        "Что я умею:\n"
         "• 🎤 Распознать песню из голосового\n"
         "• 🔍 Найти музыку по названию\n"
         "• 📎 Скачать MP3 с YouTube\n\n"
-        "Просто напиши:\n"
+        "Примеры:\n"
         "<code>найди песню Imagine Dragons</code>\n"
-        "<code>скачай музыку Rick Astley</code>\n"
         "<code>что за трек</code> (отправь голосовое)"
     )
     await message.reply(text, parse_mode="HTML")
 
 @dp.message(F.text == "🔍 Поиск")
 async def cmd_search(message: Message):
-    """Кнопка поиска"""
     text = (
         "🔍 <b>MonGPT — Поиск</b>\n\n"
-        "Что ищем?\n\n"
         "• <code>погода в Москве</code>\n"
         "• <code>курс биткоина</code>\n"
-        "• <code>новости</code>\n"
         "• <code>найди ссылку на Dark Red Bedwars</code>\n"
-        "• <code>скачать текстур-пак для Minecraft</code>\n\n"
-        "Просто напиши запрос!"
+        "• <code>скачать текстур-пак для Minecraft</code>"
     )
     await message.reply(text, parse_mode="HTML")
 
 @dp.message(F.text == "⚙️ Ещё")
 async def cmd_more(message: Message):
-    """Кнопка ещё"""
     await message.reply(
-        "⚙️ <b>Дополнительные функции</b>\n\n"
-        "Выбирай ниже 👇",
+        "⚙️ <b>Дополнительные функции</b>",
         parse_mode="HTML",
         reply_markup=get_more_keyboard().as_markup()
     )
 
-# ========== ОБРАБОТЧИКИ ИНЛАЙН-КНОПОК ==========
 @dp.callback_query()
 async def process_callback(callback: CallbackQuery):
-    """Обработка инлайн кнопок"""
     action = callback.data
-    
-    if action == "draw":
-        await callback.message.edit_text(
-            "🎨 <b>Напиши, что нарисовать</b>\n"
-            "Например: <code>нарисуй красного дракона</code>",
-            parse_mode="HTML"
-        )
-    
-    elif action == "voice":
-        await callback.message.edit_text(
-            "🎤 <b>Напиши текст, который озвучить</b>",
-            parse_mode="HTML"
-        )
-    
-    elif action == "qr":
-        await callback.message.edit_text(
-            "🔲 <b>QR-код</b>\n\n"
-            "• Создать: <code>qr текст или ссылка</code>\n"
-            "• Сканировать: отправь фото QR-кода",
-            parse_mode="HTML"
-        )
-    
-    elif action == "chart":
-        await callback.message.edit_text(
-            "📈 <b>График курса</b>\n"
-            "Напиши, например:\n"
-            "<code>курс доллара график</code>\n"
-            "<code>биткоин график</code>",
-            parse_mode="HTML"
-        )
-    
-    elif action == "password":
+    if action == "password":
         password = generate_password(12)
         await callback.message.edit_text(
-            f"🔐 <b>Сгенерированный пароль:</b>\n"
-            f"<code>{password}</code>\n\n"
-            f"Для нового пароля напиши <code>пароль</code>",
+            f"🔐 <b>Пароль:</b> <code>{password}</code>",
             parse_mode="HTML"
         )
-    
-    elif action == "sticker":
-        await callback.message.edit_text(
-            "🎭 <b>Стикер из фото</b>\n"
-            "Отправь фото с подписью <code>стикер</code>",
-            parse_mode="HTML"
-        )
-    
-    elif action == "link":
-        await callback.message.edit_text(
-            "🌐 <b>Поиск ссылок</b>\n"
-            "Напиши, например:\n"
-            "<code>найди ссылку на Dark Red Bedwars</code>\n"
-            "<code>где скачать текстур-пак для Minecraft</code>",
-            parse_mode="HTML"
-        )
-    
-    elif action == "video":
-        await callback.message.edit_text(
-            "📹 <b>Скачивание видео</b>\n"
-            "Пришли ссылку на YouTube, я скачаю:\n"
-            "<code>https://youtu.be/...</code>",
-            parse_mode="HTML"
-        )
-    
-    elif action == "currency":
-        await callback.message.edit_text(
-            "📊 <b>Курс валют</b>\n"
-            "Напиши, например:\n"
-            "<code>курс доллара</code>\n"
-            "<code>евро график</code>",
-            parse_mode="HTML"
-        )
-    
-    elif action == "weather":
-        await callback.message.edit_text(
-            "🌡️ <b>Погода</b>\n"
-            "Напиши город, например:\n"
-            "<code>погода в Москве</code>\n"
-            "<code>погода Саранск</code>",
-            parse_mode="HTML"
-        )
-    
-    elif action == "calc":
-        await callback.message.edit_text(
-            "🧮 <b>Калькулятор</b>\n"
-            "Напиши пример, например:\n"
-            "<code>2+2*2</code>\n"
-            "<code>(15+3)/2</code>",
-            parse_mode="HTML"
-        )
-    
-    elif action == "convert":
-        await callback.message.edit_text(
-            "🔄 <b>Конвертер</b>\n"
-            "Напиши, например:\n"
-            "<code>100 USD в RUB</code>\n"
-            "<code>10 км в милях</code>",
-            parse_mode="HTML"
-        )
-    
-    elif action == "translate":
-        await callback.message.edit_text(
-            "📝 <b>Переводчик</b>\n"
-            "Напиши, например:\n"
-            "<code>переведи hello</code>\n"
-            "<code>как будет привет по-английски</code>",
-            parse_mode="HTML"
-        )
-    
     elif action == "random":
         number = random.randint(1, 100)
-        await callback.message.edit_text(
-            f"🎲 <b>Случайное число:</b> {number}",
-            parse_mode="HTML"
-        )
-    
+        await callback.message.edit_text(f"🎲 <b>Число:</b> {number}", parse_mode="HTML")
     elif action == "date":
         date = datetime.now().strftime("%d.%m.%Y")
-        await callback.message.edit_text(
-            f"📅 <b>Сегодня:</b> {date}",
-            parse_mode="HTML"
-        )
-    
+        await callback.message.edit_text(f"📅 <b>Сегодня:</b> {date}", parse_mode="HTML")
     elif action == "time":
         time = datetime.now().strftime("%H:%M:%S")
+        await callback.message.edit_text(f"⏰ <b>Время:</b> {time}", parse_mode="HTML")
+    else:
         await callback.message.edit_text(
-            f"⏰ <b>Точное время:</b> {time}",
+            f"🔧 <b>Функция {action} в разработке</b>\n"
+            f"Напиши текстом что хочешь",
             parse_mode="HTML"
         )
-    
     await callback.answer()
 
-# ========== ОБРАБОТЧИКИ КОМАНД ==========
 @dp.message(Command("add_tokens"))
 async def cmd_add_tokens(message: Message):
-    """Восстановление баланса (только для создателя)"""
     global your_balance
     if message.from_user.id == YOUR_USER_ID:
         your_balance = 666_666_666
@@ -927,55 +617,34 @@ async def cmd_add_tokens(message: Message):
 
 @dp.message(Command("clear"))
 async def cmd_clear(message: Message):
-    """Сброс истории"""
     clear_history(message.from_user.id)
     await message.reply("<b>🧹 История сброшена</b>", parse_mode="HTML")
 
-# ========== ОБРАБОТЧИК ТЕКСТА ==========
 @dp.message()
 async def handle_text(message: Message):
-    """Главный обработчик текстовых сообщений"""
     user_id = message.from_user.id
     text = message.text
     
-    if not text:
+    if not text or text in ["🤖 MonGPT", "❓ Помощь", "💰 Баланс", "⚡ Функции", "🖼️ Фото", "🎵 Музыка", "🔍 Поиск", "⚙️ Ещё"]:
         return
     
-    # Пропускаем обработку команд и кнопок
-    if text in ["🤖 MonGPT", "❓ Помощь", "💰 Баланс", "⚡ Функции", "🖼️ Фото", "🎵 Музыка", "🔍 Поиск", "⚙️ Ещё"]:
-        return
-    
-    # Проверка баланса
     if not check_balance(user_id):
         await message.reply("<b>💀 Недостаточно токенов</b>", parse_mode="HTML")
         return
     
     cost = get_token_cost()
     deduct_balance(user_id, cost)
-    
     loading = await message.reply("⏳")
     
-    # 1. ПОИСК ССЫЛОК
-    if "найди ссылку" in text.lower() or "где скачать" in text.lower() or "dark red bedwars" in text.lower():
-        query = text.lower()
-        links = await search_download_link(query)
-        
-        if links:
-            response = "🔗 <b>Найденные ссылки:</b>\n\n"
-            for link in links[:5]:
-                response += f"• <a href='{link['url']}'>{link['title'][:50]}</a>\n"
+    # Поиск ссылок
+    if "найди ссылку" in text.lower() or "где скачать" in text.lower():
+        search_result = await search_web(text)
+        if search_result:
             await loading.delete()
-            await message.reply(response, parse_mode="HTML", disable_web_page_preview=True)
+            await message.reply(f"🔍 <b>Нашел:</b>\n\n{search_result}", parse_mode="HTML", disable_web_page_preview=True)
             return
-        else:
-            # Если не нашли специфические ссылки, ищем через обычный поиск
-            search_result = await search_web(text)
-            if search_result:
-                await loading.delete()
-                await message.reply(f"🔍 <b>Нашел:</b>\n\n{search_result}", parse_mode="HTML", disable_web_page_preview=True)
-                return
     
-    # 2. ПОГОДА
+    # Погода
     if "погода" in text.lower() and "в " in text.lower():
         city = text.lower().split("в ")[-1].strip()
         weather = await get_weather(city)
@@ -984,19 +653,16 @@ async def handle_text(message: Message):
             await message.reply(f"🌡️ <b>Погода в {city.title()}:</b>\n{weather}", parse_mode="HTML")
             return
     
-    # 3. КУРС ВАЛЮТ С ГРАФИКОМ
-    if "график" in text.lower() and ("курс" in text.lower() or "биткоин" in text.lower() or "btc" in text.lower()):
-        currency = "BTC" if "биткоин" in text.lower() or "btc" in text.lower() else "USD"
+    # График
+    if "график" in text.lower() or "курс" in text.lower():
+        currency = "BTC" if "биткоин" in text.lower() else "USD"
         chart = await create_currency_chart(currency)
         if chart:
             await loading.delete()
-            await message.reply_photo(
-                BufferedInputFile(chart.getvalue(), filename="chart.png"),
-                caption=f"📈 <b>График {currency}</b>"
-            )
+            await message.reply_photo(BufferedInputFile(chart.getvalue(), filename="chart.png"), caption=f"📈 <b>График {currency}</b>")
             return
     
-    # 4. КАЛЬКУЛЯТОР
+    # Калькулятор
     if re.match(r'^[\d\s+\-*/().]+$', text):
         result = calculate(text)
         if result:
@@ -1004,45 +670,8 @@ async def handle_text(message: Message):
             await message.reply(f"🧮 <b>Результат:</b> {result}", parse_mode="HTML")
             return
     
-    # 5. КОНВЕРТАЦИЯ ВАЛЮТ
-    if re.search(r'\d+\s*[A-Z]{3}\s*в\s*[A-Z]{3}', text.upper()):
-        parts = text.upper().split()
-        try:
-            amount = float(parts[0])
-            from_curr = parts[1]
-            to_curr = parts[3]
-            result = await convert_currency(amount, from_curr, to_curr)
-            if result:
-                await loading.delete()
-                await message.reply(f"💱 <b>{amount} {from_curr} = {result:.2f} {to_curr}</b>", parse_mode="HTML")
-                return
-        except:
-            pass
-    
-    # 6. ПЕРЕВОДЧИК
-    if "переведи" in text.lower() or "как будет" in text.lower():
-        # Используем OpenRouter для перевода
-        answer = await smart_chat(user_id, text)
-        await loading.delete()
-        await message.reply(answer, parse_mode="HTML")
-        return
-    
-    # 7. ГЕНЕРАЦИЯ КАРТИНОК
-    if "нарисуй" in text.lower() or "draw" in text.lower():
-        prompt = text.replace("нарисуй", "").replace("draw", "").strip()
-        if prompt:
-            image_url = await generate_image(prompt)
-            if image_url:
-                await loading.delete()
-                await message.reply(f"🎨 <b>Вот что получилось:</b>\n{image_url}", parse_mode="HTML")
-                return
-            else:
-                await loading.delete()
-                await message.reply("❌ <b>Не удалось сгенерировать картинку</b>", parse_mode="HTML")
-                return
-    
-    # 8. ГЕНЕРАЦИЯ ПАРОЛЯ
-    if "пароль" in text.lower() or "pass" in text.lower():
+    # Пароль
+    if "пароль" in text.lower():
         nums = re.findall(r'\d+', text)
         length = int(nums[0]) if nums else 12
         password = generate_password(length)
@@ -1050,23 +679,19 @@ async def handle_text(message: Message):
         await message.reply(f"🔐 <b>Пароль:</b> <code>{password}</code>", parse_mode="HTML")
         return
     
-    # 9. ГЕНЕРАЦИЯ QR
+    # QR
     if "qr" in text.lower() and not text.startswith("/"):
-        qr_text = text.lower().replace("qr", "").replace("куар", "").strip()
+        qr_text = text.lower().replace("qr", "").strip()
         if qr_text:
             qr_img = await generate_qr(qr_text)
             if qr_img:
                 await loading.delete()
-                await message.reply_photo(
-                    BufferedInputFile(qr_img.getvalue(), filename="qr.png"),
-                    caption=f"🔲 <b>QR для:</b> {qr_text}"
-                )
+                await message.reply_photo(BufferedInputFile(qr_img.getvalue(), filename="qr.png"), caption=f"🔲 <b>QR для:</b> {qr_text}")
                 return
     
-    # 10. СКАЧИВАНИЕ МУЗЫКИ
-    if "скачай музыку" in text.lower() or "скачай песню" in text.lower() or "найди песню" in text.lower():
-        query = text.lower()
-        query = query.replace("скачай музыку", "").replace("скачай песню", "").replace("найди песню", "").strip()
+    # Скачивание музыки
+    if "скачай музыку" in text.lower() or "найди песню" in text.lower():
+        query = text.lower().replace("скачай музыку", "").replace("найди песню", "").strip()
         if query:
             result = await download_youtube_audio(query)
             if result:
@@ -1081,31 +706,8 @@ async def handle_text(message: Message):
                 )
                 os.remove(result['file_path'])
                 return
-            else:
-                await loading.delete()
-                await message.reply("❌ <b>Не нашел такую песню</b>", parse_mode="HTML")
-                return
     
-    # 11. СКАЧИВАНИЕ ВИДЕО
-    if "скачай видео" in text.lower() and ("http" in text or "youtu" in text):
-        url_match = re.search(r'(https?://[^\s]+)', text)
-        if url_match:
-            url = url_match.group(0)
-            video_path = await download_youtube_video(url)
-            if video_path:
-                await loading.delete()
-                await message.reply_video(
-                    FSInputFile(video_path),
-                    caption="📹 <b>Вот твое видео</b>"
-                )
-                os.remove(video_path)
-                return
-            else:
-                await loading.delete()
-                await message.reply("❌ <b>Не удалось скачать видео</b>", parse_mode="HTML")
-                return
-    
-    # 12. ОБЫЧНЫЙ УМНЫЙ ЧАТ
+    # Умный чат
     answer = await smart_chat(user_id, text)
     add_to_history(user_id, "user", text)
     add_to_history(user_id, "assistant", answer)
@@ -1113,10 +715,8 @@ async def handle_text(message: Message):
     await loading.delete()
     await message.reply(answer, parse_mode="HTML")
 
-# ========== ОБРАБОТЧИК ГОЛОСОВЫХ ==========
 @dp.message(F.voice | F.video_note | F.audio | F.video)
 async def handle_media(message: Message):
-    """Обработка медиафайлов"""
     user_id = message.from_user.id
     
     if not check_balance(user_id):
@@ -1125,56 +725,64 @@ async def handle_media(message: Message):
     
     cost = get_token_cost()
     deduct_balance(user_id, cost)
-    
     loading = await message.reply("⏳")
     
     file_id = None
-    media_type = None
-    
     if message.voice:
         file_id = message.voice.file_id
-        media_type = "голосовое"
     elif message.video_note:
         file_id = message.video_note.file_id
-        media_type = "кружок"
     elif message.video:
         file_id = message.video.file_id
-        media_type = "видео"
     elif message.audio:
         file_id = message.audio.file_id
-        media_type = "аудио"
     
     if file_id:
         file_path = await download_file(file_id)
         
-        # Сначала пробуем распознать речь
-        recognized = await transcribe_audio(file_path)
+        # Пробуем распознать музыку
+        music_info = await recognize_music_audd(file_path)
+        if music_info:
+            await loading.delete()
+            await message.reply(
+                f"🎵 <b>Распознано:</b>\n"
+                f"Название: {music_info['title']}\n"
+                f"Исполнитель: {music_info['artist']}\n"
+                f"Альбом: {music_info['album']}",
+                parse_mode="HTML"
+            )
+            os.unlink(file_path)
+            return
         
-        # Если это похоже на музыку, пробуем распознать трек
-        if "не удалось распознать" in recognized.lower() or len(recognized) < 10:
-            music_info = await recognize_music_audd(file_path)
-            if music_info:
-                await loading.delete()
-                await message.reply(
-                    f"🎵 <b>Распознано:</b>\n"
-                    f"Название: {music_info['title']}\n"
-                    f"Исполнитель: {music_info['artist']}\n"
-                    f"Альбом: {music_info['album']}\n"
-                    f"Лейбл: {music_info['label']}\n"
-                    f"Релиз: {music_info['release_date']}",
-                    parse_mode="HTML"
-                )
-                os.unlink(file_path)
-                return
-        
-        await loading.delete()
-        await message.reply(f"📝 <b>Распознал:</b>\n{recognized}", parse_mode="HTML")
-        os.unlink(file_path)
+        # Если не музыка, пробуем речь через OpenRouter (Gemini)
+        try:
+            with open(file_path, "rb") as f:
+                audio_base64 = base64.b64encode(f.read()).decode('utf-8')
+            
+            completion = await openrouter_client.chat.completions.create(
+                model="google/gemini-3-flash-preview:free",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Распознай речь в этом аудио"},
+                            {"type": "audio_url", "audio_url": {"url": f"data:audio/mpeg;base64,{audio_base64}"}}
+                        ]
+                    }
+                ]
+            )
+            recognized = completion.choices[0].message.content
+            await loading.delete()
+            await message.reply(f"📝 <b>Распознал:</b>\n{recognized}", parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Media error: {e}")
+            await loading.delete()
+            await message.reply("❌ <b>Не удалось распознать</b>", parse_mode="HTML")
+        finally:
+            os.unlink(file_path)
 
-# ========== ОБРАБОТЧИК ФОТО ==========
 @dp.message(F.photo)
 async def handle_photo(message: Message):
-    """Обработка фотографий"""
     user_id = message.from_user.id
     
     if not check_balance(user_id):
@@ -1183,25 +791,21 @@ async def handle_photo(message: Message):
     
     cost = get_token_cost()
     deduct_balance(user_id, cost)
-    
     loading = await message.reply("⏳")
     
     file_id = message.photo[-1].file_id
     file_path = await download_file(file_id)
-    
-    # Проверяем подпись
     caption = message.caption.lower() if message.caption else ""
     
-    # 1. Сканирование QR-кода
-    if PYZBAR_AVAILABLE:
-        qr_text = await scan_qr(file_path)
-        if qr_text:
-            await loading.delete()
-            await message.reply(f"🔲 <b>QR-код:</b>\n<code>{qr_text}</code>", parse_mode="HTML")
-            os.unlink(file_path)
-            return
+    # Сканирование QR
+    qr_text = await scan_qr(file_path)
+    if qr_text:
+        await loading.delete()
+        await message.reply(f"🔲 <b>QR-код:</b>\n<code>{qr_text}</code>", parse_mode="HTML")
+        os.unlink(file_path)
+        return
     
-    # 2. Создание стикера
+    # Стикер
     if "стикер" in caption:
         sticker = await image_to_sticker(file_path)
         if sticker:
@@ -1210,19 +814,16 @@ async def handle_photo(message: Message):
             os.unlink(file_path)
             return
     
-    # 3. Улучшение качества
-    if "улучши" in caption or "enhance" in caption:
+    # Улучшение
+    if "улучши" in caption:
         enhanced = await enhance_image(file_path)
         if enhanced:
             await loading.delete()
-            await message.reply_photo(
-                BufferedInputFile(enhanced.getvalue(), filename="enhanced.jpg"),
-                caption="🖼️ <b>Улучшенное фото</b>"
-            )
+            await message.reply_photo(BufferedInputFile(enhanced.getvalue(), filename="enhanced.jpg"), caption="🖼️ <b>Улучшенное фото</b>")
             os.unlink(file_path)
             return
     
-    # 4. Анализ изображения
+    # Анализ
     if "что это" in caption or "что на фото" in caption:
         analysis = await analyze_image(file_path)
         if analysis:
@@ -1231,27 +832,17 @@ async def handle_photo(message: Message):
             os.unlink(file_path)
             return
     
-    # 5. Просто сохраняем фото
     await loading.delete()
-    await message.reply_photo(
-        FSInputFile(file_path),
-        caption="🖼️ <b>Фото сохранено</b>"
-    )
+    await message.reply_photo(FSInputFile(file_path), caption="🖼️ <b>Фото сохранено</b>")
     os.unlink(file_path)
 
-# ========== ОБРАБОТЧИК ДОКУМЕНТОВ ==========
 @dp.message(F.document)
 async def handle_document(message: Message):
-    """Обработка документов"""
     await message.reply("📄 <b>Документ получен</b>\nОбработка в разработке", parse_mode="HTML")
 
-# ========== ЗАПУСК ==========
 async def main():
     logger.info("🚀 Запуск MonGPT...")
-    
-    # Создаем папку для временных файлов
     os.makedirs('temp', exist_ok=True)
-    
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
