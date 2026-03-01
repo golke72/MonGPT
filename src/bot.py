@@ -66,8 +66,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 YOUR_USER_ID = int(os.getenv("YOUR_USER_ID", "0"))
-ACRCLOUD_ACCESS_KEY = os.getenv("ACRCLOUD_ACCESS_KEY")
-ACRCLOUD_SECRET_KEY = os.getenv("ACRCLOUD_SECRET_KEY")
+AUDD_API_TOKEN = os.getenv("AUDD_API_TOKEN")
 
 if not BOT_TOKEN:
     raise ValueError("❌ Нет токена бота! Проверь .env файл")
@@ -305,61 +304,38 @@ async def transcribe_audio(file_path: str) -> str:
         logger.error(f"Transcribe error: {e}")
         return f"Ошибка распознавания: {str(e)}"
 
-async def recognize_music(file_path: str) -> Optional[dict]:
-    """Распознавание музыки через ACRCloud"""
-    if not ACRCLOUD_ACCESS_KEY or not ACRCLOUD_SECRET_KEY:
+async def recognize_music_audd(file_path: str) -> Optional[dict]:
+    """Распознавание музыки через AudD API"""
+    if not AUDD_API_TOKEN:
         return None
     
     try:
-        import hashlib
-        import hmac
-        import base64
-        
-        # Подготовка данных для ACRCloud API
+        # Читаем аудиофайл
         with open(file_path, "rb") as f:
-            sample_bytes = f.read()
+            audio_data = f.read()
         
-        timestamp = str(int(datetime.now().timestamp()))
-        string_to_sign = f"POST\n/v1/identify\n{ACRCLOUD_ACCESS_KEY}\naudio\n1\n{timestamp}"
-        
-        sign = base64.b64encode(
-            hmac.new(
-                ACRCLOUD_SECRET_KEY.encode('ascii'),
-                string_to_sign.encode('ascii'),
-                hashlib.sha1
-            ).digest()
-        ).decode('ascii')
-        
-        # Запрос к API
-        files = {'sample': ('audio', sample_bytes, 'audio/mpeg')}
-        data = {
-            'access_key': ACRCLOUD_ACCESS_KEY,
-            'data_type': 'audio',
-            'signature': sign,
-            'signature_version': '1',
-            'sample_bytes': len(sample_bytes),
-            'timestamp': timestamp
-        }
-        
+        # Отправляем запрос
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                'https://identify-us-west-2.acrcloud.com/v1/identify',
-                data=data,
-                files={'sample': sample_bytes}
-            ) as resp:
+            data = aiohttp.FormData()
+            data.add_field('api_token', AUDD_API_TOKEN)
+            data.add_field('file', audio_data, filename='audio.mp3', content_type='audio/mpeg')
+            data.add_field('return', 'apple_music,spotify')
+            
+            async with session.post('https://api.audd.io/', data=data) as resp:
                 if resp.status == 200:
                     result = await resp.json()
-                    if result.get('status', {}).get('code') == 0:
-                        metadata = result.get('metadata', {})
-                        music = metadata.get('music', [])
-                        if music:
+                    if result.get('status') == 'success':
+                        track = result.get('result', {})
+                        if track:
                             return {
-                                'title': music[0].get('title', 'Unknown'),
-                                'artist': music[0].get('artists', [{'name': 'Unknown'}])[0].get('name'),
-                                'album': music[0].get('album', {}).get('name', 'Unknown')
+                                'title': track.get('title', 'Unknown'),
+                                'artist': track.get('artist', 'Unknown'),
+                                'album': track.get('album', 'Unknown'),
+                                'label': track.get('label', ''),
+                                'release_date': track.get('release_date', '')
                             }
     except Exception as e:
-        logger.error(f"Music recognition error: {e}")
+        logger.error(f"AudD error: {e}")
     return None
 
 # ========== ПОИСК ==========
@@ -1176,14 +1152,16 @@ async def handle_media(message: Message):
         
         # Если это похоже на музыку, пробуем распознать трек
         if "не удалось распознать" in recognized.lower() or len(recognized) < 10:
-            music_info = await recognize_music(file_path)
+            music_info = await recognize_music_audd(file_path)
             if music_info:
                 await loading.delete()
                 await message.reply(
                     f"🎵 <b>Распознано:</b>\n"
                     f"Название: {music_info['title']}\n"
                     f"Исполнитель: {music_info['artist']}\n"
-                    f"Альбом: {music_info['album']}",
+                    f"Альбом: {music_info['album']}\n"
+                    f"Лейбл: {music_info['label']}\n"
+                    f"Релиз: {music_info['release_date']}",
                     parse_mode="HTML"
                 )
                 os.unlink(file_path)
