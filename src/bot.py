@@ -4,10 +4,11 @@ import os
 import random
 import tempfile
 import hashlib
-import io
+import io  
 import re
 from typing import Dict, Optional
 from collections import deque
+from io import BytesIO 
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
