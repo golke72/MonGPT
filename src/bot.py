@@ -25,17 +25,9 @@ import yt_dlp
 from PIL import Image
 import cv2
 import numpy as np
-from pyzbar.pyzbar import decode
-import qrcode
 import matplotlib.pyplot as plt
 from gtts import gTTS
 from cachetools import TTLCache
-
-# Импорт keep_alive
-from src.keep_alive import keep_alive
-
-# Запускаем keep-alive сервер
-keep_alive()
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -182,31 +174,6 @@ async def generate_image(prompt: str) -> Optional[str]:
         logger.error(f"Image error: {e}")
     return None
 
-async def scan_qr(file_path: str) -> Optional[str]:
-    try:
-        image = cv2.imread(file_path)
-        qr_codes = decode(image)
-        if qr_codes:
-            return qr_codes[0].data.decode('utf-8')
-    except:
-        pass
-    return None
-
-async def create_qr(data: str) -> BytesIO:
-    img = qrcode.make(data)
-    bio = io.BytesIO()
-    img.save(bio, 'PNG')
-    bio.seek(0)
-    return bio
-
-async def photo_to_sticker(file_path: str) -> BytesIO:
-    img = Image.open(file_path)
-    img.thumbnail((512, 512))
-    bio = io.BytesIO()
-    img.save(bio, 'PNG')
-    bio.seek(0)
-    return bio
-
 def generate_password(length: int = 12) -> str:
     chars = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%&"
     return ''.join(random.choice(chars) for _ in range(length))
@@ -277,7 +244,6 @@ async def cmd_help(message: Message):
         "Просто пиши что хочешь — я сам пойму:\n\n"
         "🎨 <b>Рисунки:</b> \"нарисуй кота\"\n"
         "🎤 <b>Голос:</b> \"озвучь привет\"\n"
-        "🔲 <b>QR:</b> \"qr https://...\"\n"
         "🔐 <b>Пароль:</b> \"пароль 12\"\n"
         "🎵 <b>Музыка:</b> \"найди песню Imagine Dragons\"\n\n"
         "<b>⚡ КОМАНДЫ:</b>\n"
@@ -367,18 +333,6 @@ async def handle_all(message: Message):
             await message.reply(f"🔍 <b>Нашел:</b>\n\n{result}", parse_mode="HTML")
             return
     
-    # QR
-    if "qr" in text.lower() or "куар" in text.lower():
-        qr_text = text.lower().replace("qr", "").replace("куар", "").strip()
-        if qr_text:
-            qr_img = await create_qr(qr_text)
-            await loading.delete()
-            await message.reply_photo(
-                BufferedInputFile(qr_img.getvalue(), filename="qr.png"),
-                caption=f"🔲 <b>QR для:</b> {qr_text}"
-            )
-            return
-    
     # ПАРОЛЬ
     if "пароль" in text.lower() or "pass" in text.lower():
         nums = re.findall(r'\d+', text)
@@ -432,12 +386,7 @@ async def handle_photo(message: Message):
     file_id = message.photo[-1].file_id
     file_path = await download_file(file_id)
     
-    qr_text = await scan_qr(file_path)
-    if qr_text:
-        os.unlink(file_path)
-        await message.reply(f"🔲 <b>QR-код:</b>\n<code>{qr_text}</code>", parse_mode="HTML")
-        return
-    
+    # QR-коды УДАЛЕНЫ, только стикеры
     if message.caption and "стикер" in message.caption.lower():
         sticker = await photo_to_sticker(file_path)
         await message.reply_sticker(BufferedInputFile(sticker.getvalue(), filename="sticker.png"))
@@ -446,6 +395,14 @@ async def handle_photo(message: Message):
     
     os.unlink(file_path)
     await message.reply("🖼️ <b>Фото получил</b>", parse_mode="HTML")
+
+async def photo_to_sticker(file_path: str) -> BytesIO:
+    img = Image.open(file_path)
+    img.thumbnail((512, 512))
+    bio = io.BytesIO()
+    img.save(bio, 'PNG')
+    bio.seek(0)
+    return bio
 
 async def main():
     logger.info("🚀 Запуск MonGPT...")
