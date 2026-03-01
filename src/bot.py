@@ -31,6 +31,12 @@ import matplotlib.pyplot as plt
 from gtts import gTTS
 from cachetools import TTLCache
 
+# Импорт keep_alive
+from src.keep_alive import keep_alive
+
+# Запускаем keep-alive сервер
+keep_alive()
+
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -442,6 +448,7 @@ async def handle_photo(message: Message):
     await message.reply("🖼️ <b>Фото получил</b>", parse_mode="HTML")
 
 async def main():
+    logger.info("🚀 Запуск MonGPT...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
